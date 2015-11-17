@@ -1,0 +1,118 @@
+---
+title: "ML Project"
+author: "John Mitchell"
+date: "November 14, 2015"
+output: html_document
+---
+This project seeks to create a machine learning predictor to determine types of movement from an exercise data set. Below are the steps to creating the model, testing it on a validation set and applying the model to the test set to check answers.
+
+Set up the seed and install needed libraries.
+```{r, message = FALSE}
+library(data.table); library(dplyr); library(caret); library(doParallel); library(xgboost); library(randomForest);
+set.seed(19835)
+```
+
+Read in the test and training data directly from the URLs.
+```{r, cache = TRUE}
+trainURL <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+trainSet <- fread(trainURL)
+testURL <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+testSet <- fread(testURL)
+```
+
+Clean up the data, remove columns with mostly NA. Although there are a number of ways to filter columns by number of NA, it seemed easiest to remove them with dplyr. This is applied to both the train and test sets.
+```{r}
+nt <- trainSet %>% select(-starts_with("kurtosis")) %>% select(-starts_with("skewness")) %>% select(-starts_with("max")) %>% select(-starts_with("min")) %>% select(-starts_with("amplitude")) %>% select(-starts_with("var")) %>% select(-starts_with("avg")) %>% select(-starts_with("stddev")) %>% select(-starts_with("raw")) %>% select(-starts_with("cvtd")) %>% select(-starts_with("new_window")) %>% select(-starts_with("num_window"))
+nt <- as.data.frame(nt)
+nt2 <- testSet %>% select(-starts_with("kurtosis")) %>% select(-starts_with("skewness")) %>% select(-starts_with("max")) %>% select(-starts_with("min")) %>% select(-starts_with("amplitude")) %>% select(-starts_with("var")) %>% select(-starts_with("avg")) %>% select(-starts_with("stddev")) %>% select(-starts_with("raw")) %>% select(-starts_with("cvtd")) %>% select(-starts_with("new_window")) %>% select(-starts_with("num_window"))
+nt2 <- as.data.frame(nt2)
+```
+
+Change feature classes to numeric, and the classe class to a factor.
+```{r}
+featureNames <- names(nt)[2:54]
+for (f in featureNames) {
+        if (class(nt[[f]])=="character") {
+                levels <- unique(c(nt[[f]], nt2[[f]]))
+                nt[[f]] <- as.numeric(factor(nt[[f]], levels=levels))
+                nt2[[f]]  <- as.numeric(factor(nt2[[f]],  levels=levels))
+        }
+}
+nt$V1 <- as.numeric(nt$V1)
+nt2$V1 <- as.numeric(nt2$V1)
+nt2$user_name <- as.numeric(factor(nt2$user_name))
+nt$classe <- as.factor(nt$classe)
+```
+
+Partition the train data set into a testing and training components. This will be used to cross validate the model before applying it to the final test set.
+```{r, cache = TRUE}
+inTrain <- createDataPartition(y = nt$V1, p = 0.7, list = FALSE)
+training <- nt[inTrain,]
+testing <- nt[-inTrain,]
+```
+
+Preprocess the training set to find the principle components.
+```{r}
+preProc <- preProcess(training[,2:54], method = "pca", thresh = 0.90)
+trainingPC <- predict(preProc, training[,2:54])
+```
+
+Now, train a random forest model using the training set. There is no need for additional cross validation when using a random forest model, because random forests are constructed with bootstrapped samples when each tree is created.
+```{r, cache = TRUE, message = FALSE}
+cl <- makeCluster(detectCores())
+ registerDoParallel(cl)
+modelFit <- randomForest(trainingPC, training$classe, ntree=200, imp=TRUE, sampsize=10000, do.trace=FALSE)
+ stopCluster(cl)
+```
+Then, use the rf model to predict the training set classe values. 
+```{r}
+testingPC <- predict(preProc, testing[,2:54])
+pred1 <- predict(modelFit, testingPC)
+pred1check <- confusionMatrix(testing$classe, pred1)
+pred1check$overall
+```
+We can see from the confusion matrix that the rf model gets a 97 % accuracy rating on the testing set. This would estimate the out of sample error rate at 3%.
+
+For comparison we will also test a gradient boosting model with 3 fold cross validation.
+```{r, cache = TRUE, message = FALSE}
+fitControl <- trainControl(
+                           method = "repeatedcv",
+                           number = 3,
+                           repeats = 3,
+                           allowParallel = TRUE,
+                           classProbs = TRUE)
+cl <- makeCluster(detectCores())
+ registerDoParallel(cl)
+modelFit3 <- train(
+                 training$classe ~ ., data = trainingPC,
+                 method = "gbm",
+                 trControl = fitControl,
+                 verbose = FALSE,
+                 metric = "Accuracy",
+                 tuneLength = 5)
+ stopCluster(cl)
+```
+
+We will then use the model to do a separate prediction.
+```{r, message = FALSE}
+pred3 <- predict(modelFit3, testingPC)
+pred3check <- confusionMatrix(testing$classe, pred3)
+pred3check$overall
+```
+
+From the confusion matrix, we can see that the gbm achieves a 90 % accuracy rating. This could probably be improved through tuning parameters.
+
+We then can apply the preprocessing pca from the training set to our real test set.
+```{r}
+answerPC <- predict(preProc, nt2[, 2:54])
+```
+
+And finally, we will use the two models to predict the classe values for our 20 cases
+```{r}
+answer <- predict(modelFit, answerPC)
+print(answer)
+answerb <- predict(modelFit3, answerPC)
+print(answerb)
+```
+We see that the two models agree on all of the 20 values. These are the answers submitted for grading. 
+
